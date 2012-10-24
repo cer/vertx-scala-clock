@@ -1,0 +1,188 @@
+/*
+ * Copyright 2012 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+apply plugin: 'scala'
+
+defaultTasks = ['assembleApp']
+
+//sourceCompatibility = '1.7'
+//targetCompatibility = '1.7'
+
+jar.enabled = false // We don't produce a jar
+
+configurations {
+  provided
+}
+
+repositories {
+  maven { url 'https://oss.sonatype.org/content/repositories/snapshots' }
+  maven { url 'http://repo.springsource.org/libs-snapshot' }
+  mavenCentral()
+  add(new org.apache.ivy.plugins.resolver.URLResolver()) {
+    name = 'vertx.io'
+    addArtifactPattern 'http://[organisation]/downloads/[module]-[revision].[ext]'
+  }
+}
+
+configurations {
+	framework
+}
+	
+dependencies {
+
+ scalaTools 'org.scala-lang:scala-compiler:2.9.2'
+ scalaTools 'org.scala-lang:scala-library:2.9.2'
+ compile 'org.scala-lang:scala-library:2.9.2'
+
+ framework "vertx.io:vert.x:${vertxVersion}@zip"
+  
+  provided     "org.vert-x:vertx-core:$vertxVersion"
+  provided     "org.vert-x:vertx-platform:$vertxVersion"
+
+  compile "org.cloudfoundry:cloudfoundry-runtime:0.8.1"
+  
+  testCompile  "org.vert-x:vertx-lang-java:$vertxVersion"
+  testCompile( "org.vert-x:vertx-testframework:$vertxVersion" ) {
+    transitive = false
+  }
+  testCompile  "junit:junit:$junitVersion"
+}
+
+sourceSets {
+  main {
+    compileClasspath = compileClasspath + configurations.provided
+  }
+}
+
+task copyMod( type:Copy, dependsOn: 'classes' ) {
+  into "build/mod/$modulename-v$version"
+  from 'build/classes/main'
+  from 'src/main/conf'
+  into( 'lib' ) {
+    from configurations.compile
+  }
+  into ('public') {
+    from 'src/main/public'
+  }
+}
+
+// Package into build/libs/mod.zip
+task dist( type: Zip, dependsOn: 'copyMod' ) {
+  group = 'vert.x'
+  description = "Assembles a vert.x module in 'mod.zip' format"
+  destinationDir = project.file('build/libs')
+  archiveName = "$modulename-${version}.zip"
+  from project.file("build/mod")
+}
+
+
+task prepareVertxTest(type: Sync, dependsOn: 'copyMod' ) {
+  from 'build/mod'
+  into 'build/tmp/mod-test'
+}
+
+test {
+  // Can't have the app on the vert.x classpath
+  classpath = files( classpath.findAll {
+    !( it.toString() ==~ /.+build\/(classes|resources)\/main$/ )
+  } )
+
+  // Some vert.x properties
+  systemProperty 'vertx.test.timeout', 15
+  systemProperty 'vertx.mods', "$projectDir/build/tmp/mod-test"
+  systemProperty 'vertx.version', "$project.version"
+
+  // Show output
+  testLogging.showStandardStreams = true
+
+  // No idea why we need to depend on testClasses...
+  dependsOn << [ 'testClasses', 'copyMod', 'prepareVertxTest' ]
+}
+
+
+task collectDeps(type: Copy) {
+  group = 'vert.x'
+  description = 'conveniently collect dependencies for other IDEs'
+  destinationDir = file("build/deps")
+  into("compile") {
+    from configurations.compile
+  }
+  into("test") {
+    from configurations.testCompile
+  }
+}
+
+////
+
+def workDir = "${buildDir}/work"
+
+task runtime(type: Copy, dependsOn: 'dist') {
+  destinationDir file("${workDir}")
+  from configurations.framework
+
+  doLast {
+    ant.unzip(src: "${workDir}/vert.x-${vertxVersion}.zip", dest: "${workDir}")
+    ant.delete(file: "${workDir}/vert.x-${vertxVersion}.zip")
+  }
+}
+
+task installMods(type: Copy, dependsOn: ['runtime', 'copyMod']) {
+  destinationDir = file("${workDir}/mods")
+  from file("build/mod")
+}
+
+def appZip = 'vertx-clock.zip'
+
+task assembleApp(type: Zip, dependsOn: 'installMods') {
+  destinationDir = file("${buildDir}")
+  outputs.dir destinationDir
+  archiveName = "${appZip}"
+  from file("${workDir}")
+}
+
+
+/// CF bit
+
+buildscript {
+  repositories {
+    mavenCentral()
+    mavenRepo url:'http://repo.springsource.org/libs-snapshot'
+  }
+  dependencies {
+    classpath group: 'org.gradle.api.plugins', name: 'gradle-cf-plugin', version: '0.2.0'
+  }
+}
+
+apply plugin: 'cloudfoundry'
+
+
+cloudfoundry {
+  username = "${cfUser}"
+  password = "${cfPasswd}"
+
+  application = 'vertx-clock'
+  framework = 'standalone'
+  runtime = 'java7'
+  memory = 256
+  uris = ['vertx-clock.cloudfoundry.com']
+
+  services = []
+
+  file = file("${buildDir}/${appZip}")
+  command = "vert.x-${vertxVersion}/bin/vertx runmod $modulename-v${version}"
+}
+
+
